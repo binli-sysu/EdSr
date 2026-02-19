@@ -18,7 +18,7 @@ ntimestep=30
 # benchmark timestep
 basis=1.0 
 # EdSr equation number of order
-maxIter=50
+maxIter=500
 # number of frames
 ntrajs=20000 
 # choose one in ['benchmark', 'control', 'EdSr', 'vv']

@@ -1,21 +1,17 @@
-from data import get_trajectory, hamiltonian_fn
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from functools import partial
 import numpy as np
+import logging
 
-import autograd.numpy as anp
-import autograd 
-
+from numpy import ndarray
 from tqdm import tqdm
 
-def hamilton(q, v):
-    return 4* (1 - np.cos(q)) + v**2 / 2
+from einops import rearrange, repeat
 
 class IdealPendulum(object):
 
     def __init__(
         self,
-        tStart  : float,
-        tStep   : int,
-        interval: float,
         mass    : float = 1.0,
         radius  : float = 2.0,
         gravity : float = 2.0,
@@ -25,204 +21,209 @@ class IdealPendulum(object):
         self.radius  = radius
         self.gravity = gravity
 
-        if interval < 0.:
-            inv_tStart = tStart + tStep * interval
-            inv_interval = -interval
-            q, p, dqdt, dpdt, times = get_trajectory(inv_tStart, tStep, inv_interval, m = self.mass, g = self.gravity, l = self.radius)
-
-            q, p, dqdt, dpdt, times = q[::-1], p[::-1], dqdt[:, ::-1], dpdt[:, ::-1], times[::-1]
-        else:
-            q, p, dqdt, dpdt, times = get_trajectory(tStart, tStep, interval, m = self.mass, g = self.gravity, l = self.radius)
-
-        self.q, self.p, dqdt, dpdt, self.times = q, p, dqdt, dpdt, times
-        self.dqdt = np.squeeze(dqdt, 0)
-        self.dpdt = np.squeeze(dpdt, 0)
-
-
-    def getState(self, idx):
-        return self.q[idx], self.dqdt[idx]
-
     def gradient(self, x):
-        return -4* np.sin(x)
+        return -self.gravity * self.mass * np.sin(x)
+        # return -x / np.sqrt(self.radius ** 2 - x**2) * self.gravity * self.mass
 
 
-    def computeEdSr(self, status, Dt, maxIter, xi = None):
+    def computeEdSr(self, state, Dt, maxIter, split = 8):
 
-        x, v = status
+        mass, x, v = state   
 
-        xxn = x.copy() if xi is None else xi[0]
-        xvn = x.copy() if xi is None else xi[0]
+        massinv = 1. / mass 
 
-        massinv = 1.0 / self.mass
+        xn = np.array(x)
+        vn = np.array(x)
 
         Dtsq = Dt * Dt
 
+        # * compute displacement 
         for n in range(maxIter, 0, -1):
-
-            # * compute displacement
             xcoeff = 2.0 * n
-            force = self.gradient(xxn)
-            dxx = v * Dt + force * massinv * Dtsq / xcoeff
-            xxn = x + dxx / (xcoeff - 1)
+            xacc = self.gradient(xn) * massinv
+            dx = v * Dt + xacc * Dtsq / xcoeff 
+            xn = x + dx / (xcoeff - 1)
 
             # * compute velocity
             vcoeff = 2.0 * n
-            force = self.gradient(xvn)
-            dxv = force * massinv * Dt / (vcoeff - 1)
-            xvn = (x + (v + dxv) * Dt / (vcoeff - 2)) if n > 1 else (v + dxv)
+            vacc = self.gradient(vn) * massinv
+            dv = vacc * Dt / (vcoeff - 1)
+            vn = (x + (v + dv) * Dt / (vcoeff - 2)) if n > 1 else (v + dv)
 
-        return xxn, xvn
+        nextState = np.concatenate([mass, xn, vn], axis = -1)
+        return nextState
     
-    def compute_classic(self, state, Dt):
-        x, v = state
-        f = self.gradient(x)
-        acc = f / self.mass
-        new_r = x + v * Dt + 0.5 * Dt * Dt * acc
-        f = self.gradient(new_r)
-        new_acc = f / self.mass
-        new_v = v + (acc + new_acc) * Dt * 0.5
-        return new_r, new_v
+    def TrajectoryWithVV(self, init_state: ndarray, dt: float, length: int):
+
+        trajs: ndarray = np.zeros((length, *init_state.shape))
+        times: ndarray = np.arange(0, length) * dt
+
+        trajs[0] = init_state
+        acc = None
+
+        for idx in tqdm(range(1, length), desc = "vv generation: "):
+            
+            next_state, acc = self.velocityVerletIntegration(trajs[idx - 1], dt, acc)
+
+            trajs[idx] = next_state
+
+        return trajs, times
+    
+    def velocityVerletIntegration(self, state, Dt, acc):
+
+        x, v = state[1:2], state[2:]
+        mass = state[0:1]
+        massinv = 1. / mass
+
+        if acc is None:
+            acc = self.gradient(x) * massinv
+
+        nextx = x + v * Dt + 0.5 * Dt * Dt * acc 
+
+        new_acc = self.gradient(nextx) * massinv
+        nextv = v + (acc + new_acc) * Dt * 0.5 
+
+        nextState = np.concatenate([mass, nextx, nextv], axis = -1)
+
+        return nextState, new_acc
     
     # attn the first experiment, get f(x + n*dx) by f(x + (n-1)*dx)
-    def init_loop(self, maxIter: int):
-        
-        trajs: np.ndarray = np.zeros((self.times.shape[0], 2))
-        derror: np.ndarray = np.zeros_like(self.times)
-        verror: np.ndarray = np.zeros_like(self.times)
-        traderror: np.ndarray = np.zeros_like(self.times)
-        traverror: np.ndarray = np.zeros_like(self.times)
-        start = self.times[0]
-        trajs[0] = self.getState(0)
-        
-        for i in tqdm(range(1, trajs.shape[0])):
-            Dt = self.times[i] - start
-            
-            nextX, nextV = self.computeEdSr(trajs[0], Dt, maxIter)
-            traX, traV = self.compute_classic(trajs[0], Dt)
-            labelx, labelv = self.getState(i)
-            trajs[i] = nextX, nextV
-            derror[i] = np.fabs((nextX - labelx))
-            verror[i] = np.fabs((nextV - labelv))
-            traderror[i] = np.fabs((traX - labelx))
-            traverror[i] = np.fabs((traV - labelv))
-            
-        return trajs, derror, verror, traderror, traverror
     
-    # attn the second experiment, get f(x_0 + n*dx) by f(x_0)
-    def current_loop(self, maxIter: int):
-        
-        trajs: np.ndarray = np.zeros((self.times.shape[0], 2))
-        ttrajs: np.ndarray = np.zeros((self.times.shape[0], 2))
-        derror: np.ndarray = np.zeros_like(self.times)
-        verror: np.ndarray = np.zeros_like(self.times)
-        traderror: np.ndarray = np.zeros_like(self.times)
-        traverror: np.ndarray = np.zeros_like(self.times)
-        start = self.times[0]
-        trajs[0] = self.getState(0)
-        ttrajs[0] = self.getState(0)
-        
-        for i in tqdm(range(trajs.shape[0] - 1)):
-            Dt = self.times[i + 1] - self.times[i]
+    def computeEdSr_series(self, state, Dt, XmaxIter, VmaxIter, xi: None = None) -> ndarray:
 
-            nextX, nextV = self.computeEdSr(trajs[i], Dt, maxIter)
-            traX, traV = self.compute_classic(trajs[i], Dt)
+        x, v = state[1:2], state[2:]
+        mass = state[0:1]
 
-            labelx, labelv = self.getState(i + 1)
+        massinv = 1. / mass
+        xxn = x.copy() if xi is None else xi[1:2]
+        xvn = x.copy() if xi is None else xi[1:2]
 
-            trajs[i + 1] = nextX, nextV
-            ttrajs[i + 1] = traX, traV
+        Dtsq = Dt * Dt
 
-            derror[i + 1] = np.fabs((nextX - labelx))
-            verror[i + 1] = np.fabs((nextV - labelv))
-
-            traderror[i + 1] = np.fabs((traX - labelx))
-            traverror[i + 1] = np.fabs((traV - labelv))
+        for n in range(XmaxIter, 0, -1):
+            xcoeff = 2.0 * n
             
-        return trajs, derror, verror, traderror, traverror
+            # * compute displacement
+            # acc = np.einsum("ij,i->ij", self.gradient(xxn, mass), massinv)
+            xacc = self.gradient(xxn) * massinv
+            # if n == 3:
+            #     xvn = xxn.copy()
+            dxx = v * Dt + xacc * Dtsq / xcoeff
+            xxn = x + dxx / (xcoeff - 1)
 
-    def generate(self, maxIter: int):
+        # xvn = xxn.copy()
 
-        trajs: np.ndarray = np.zeros((self.times.shape[0], 2))
+        for n in range(VmaxIter, 0, -1):
+            vcoeff = 2.0 * n
+            # * compute velocity
+            vacc = self.gradient(xvn) * massinv
+            dxv = vacc * Dt / (vcoeff - 1)
+            if n >= 2:
+                xvn = (x + (v + dxv) * Dt / (vcoeff - 2)) 
+            else:
+                xvn = (v + dxv)
 
-        start = self.times[0]
-        trajs[0] = self.getState(0)
+        # acc = self.gradient(xvn) * massinv
+        # new_acc = self.gradient(xxn) * massinv
+        # xvn = v + (acc + new_acc) * Dt * 0.5
+
+        # mass = rearrange(mass, 'b -> b 1')
         
-        for i in tqdm(range(trajs.shape[0] - 1)):
-            Dt = self.times[i + 1] - self.times[i]
+        nextState = np.concatenate([mass, xxn, xvn], axis = -1)
 
-            nextX, nextV = self.computeEdSr(trajs[i], Dt, maxIter)
+        return nextState
+    
+    def generateInParallel(self, init_state: ndarray, basis_timestep: float, interval: int, length: int, XmaxIter: int, VmaxIter: int):
+        
+        times: ndarray = np.arange(0, interval * length) * basis_timestep
+        
+        if interval == 1:
+            trajs = self.generateInSeries(init_state, basis_timestep = basis_timestep, interval = interval, length = length, XmaxIter = XmaxIter, VmaxIter = VmaxIter, process_idx = 0)
+            return trajs, times
+        
 
-            trajs[i + 1] = nextX, nextV
+        init_states: ndarray = np.zeros((interval, *init_state.shape))
+
+        init_states[0] = init_state
+
+        for idx in range(interval - 1):
             
+            next_state = self.computeEdSr_series(init_states[idx], basis_timestep, XmaxIter, VmaxIter)
+
+            init_states[idx + 1] = next_state
+        
+        with ProcessPoolExecutor(max_workers = interval) as executor:
+
+            exefunc = partial(self.generateInSeries, basis_timestep = basis_timestep, interval = interval, length = length, XmaxIter = XmaxIter, VmaxIter = VmaxIter)
+            futures = [executor.submit(exefunc, init_states[process_idx], process_idx = process_idx) for process_idx in range(interval)]
+        
+            # futures = list(tqdm(executor.map(exefunc, init_states), total = interval, disable = True))
+            futures = list(map(lambda x: x.result(), futures))
+        
+        trajs = np.stack(futures, axis = 0) # shape: [interval, length, initial state shape]
+
+        trajs = rearrange(trajs, "interval length ... -> (length interval) ...")
+            
+        return trajs, times
+    
+    def generateInSeries(self, init_state: ndarray, basis_timestep: float, interval: int, length: int, XmaxIter: int, VmaxIter: int, process_idx: int = 0):
+
+        trajs: ndarray = np.zeros((length, *init_state.shape))
+
+        trajs[0] = init_state
+
+        breakpoint = 20
+
+        for idx in range(length - 1):
+
+            if process_idx == 0:
+                if idx == 2 ** breakpoint:
+                    print(f"Step {idx} has done.")
+                    breakpoint += 1
+            
+            next_state = self.computeEdSr_series(trajs[idx], basis_timestep * interval, XmaxIter, VmaxIter)
+            # next_state = self.computeEdSr_parallel(trajs[idx], basis_timestep * interval, maxIter)
+
+            trajs[idx + 1] = next_state
+
         return trajs
     
+    def makelabel(self, init_state: ndarray, basis_timestep: float, interval: int, length: int):
+        
+        trajs, times = self.TrajectoryWithVV(init_state, basis_timestep, interval * length)
+
+        return trajs[::interval], times[::interval]
 
 if __name__ == '__main__':
 
-    import matplotlib.pyplot as plt
-    from matplotlib import font_manager
-    tStart   : float = 0.0
-    interval : float = 0.8
-    tStep    : int   = 60
-    maxIter  : int   = 50
+    tStart     = 0.
+    tStep      = 1000
+    interval   = 10
+    basis_timestep = 0.05
+    XmaxIter    = 50
+    VmaxIter   = 50
 
-    mass    : float = 1.0
-    radius  : float = 2.0
-    gravity : float = 2.0
+    label_interval = 5
+    label_basis_timestep = basis_timestep / label_interval
+    label_length = tStep * interval
 
-    pendulum = IdealPendulum(tStart, tStep, interval, mass, radius, gravity)
+    mass     = 1.0
+    hamilton = 1.0
+    k        = 1.0
 
-    trajs, derror, verror, traderror, traverror = pendulum.loop(maxIter)
-    times = pendulum.times
-    labelx = pendulum.q
-    labelv = pendulum.dqdt
+    model = IdealPendulum(k = k, hamilton = hamilton)
+    
+    init_state, label, label_times = model.makelabel(tStart, mass, label_basis_timestep, label_interval, label_length)
 
-    fontsize = font_manager.FontProperties(size = 20)
+    control, control_times = model.TrajectoryWithVV(init_state, basis_timestep, interval * tStep)
 
+    edsr, edsr_times = model.generateInParallel(init_state, basis_timestep, interval, length = tStep, XmaxIter = XmaxIter, VmaxIter = VmaxIter)
 
-    eps_max = max(derror.max(), verror.max())
-
-
-    fig = plt.figure(figsize=[10,4], dpi=200)
-    # plt.xlabel('$t = t_0 + \Delta t, \Delta t = interval * step$', fontproperties = fontsize) ; plt.ylabel(r'$Error = abs(\frac{predict - label}{label + \epsilon})$', fontproperties = fontsize)
-    # plt.xlabel('$time$', fontproperties = fontsize) ; plt.ylabel(r'$Error = abs(\frac{predict - label}{label + \epsilon})$', fontproperties = fontsize)
-    plt.xlabel('$time(s)$', fontproperties = fontsize) ; plt.ylabel(r'$error$($rad \cdot s^{-1}$ or $rad$)', fontproperties = fontsize)
-    # plt.xlabel('$t = t_0 + \Delta t, \Delta t = interval * step$', fontproperties = fontsize) ; plt.ylabel(r'$q$(degree)', fontproperties = fontsize)
-    # plt.title(f'interval = {interval}s, step = {tStep}, $t \in [{tStart}, {tStart + interval * tStep}]$', loc = 'center')
-    plt.title(f'Mean Absolute Error', loc = 'center', fontsize = fontsize.get_size())
-    # plt.title(f'Evolution for Ideal Pendulum', loc = 'center', fontsize = fontsize.get_size())
-    plt.axis()
-
-    plt.yscale('log')
-    plt.plot(times, derror, label = 'Ours displacement error')
-    plt.plot(times, verror, label = 'Ours velocity error')
-    plt.plot(times, traderror, label = 'Velocity-Verlet displacement error')
-    plt.plot(times, traverror, label = 'Velocity-Verlet velocity error')
-
-    # plt.plot(times, trajs[:, 0], label = 'Ours displacement')
-    # plt.plot(times, labelx, label = 'label displacement')
-    # plt.scatter(times, trajs[:, 0], s = 8)
-    # plt.scatter(times, labelx , s = 2)
-
-    # plt.plot(times, trajs[:, 1], label = 'Ours velocity')
-    # plt.plot(times, labelv, label = 'label velocity')
-    # plt.scatter(times, trajs[:, 1], s = 8)
-    # plt.scatter(times, labelv , s = 2)
-
-    # plt.yticks([-np.pi / 4, -np.pi / 6,-np.pi / 9, 0, np.pi / 9, np.pi / 6, np.pi / 4], 
-    #            ['$-\\frac{\pi}{4}$', '$-\\frac{\pi}{6}$', '$-\\frac{\pi}{9}$', '0', '$\\frac{\pi}{9}$', '$\\frac{\pi}{6}$', '$\\frac{\pi}{4}$'])
-    if interval > 0:
-        plt.xticks(np.linspace(tStart, tStart + interval * (tStep + 1), 7, dtype = np.int16))
-    else:   
-        plt.xticks(np.linspace(tStart + interval * (tStep - 1), tStart, 7, dtype = np.int16))
-
-    plt.tick_params(axis = 'both', labelsize = 17)
-
-    # labelh = hamilton(labelx, labelv, mass, radius, gravity)
-    # h = hamilton(trajs[:, 0], trajs[:, 1], mass, radius, gravity)
-    # print(h)
-    # print(labelh)
-    # plt.plot(times, labelh, label = 'label Hamiltonian')
-    # plt.plot(times, h, label = 'Hamiltonian')
-    plt.legend(loc = 'lower right')
-    plt.show()
+    print(label_times)
+    print(control_times)
+    print(edsr_times)
+    print(label.shape, edsr.shape, label_times.shape, edsr_times.shape)
+    edsr_e = np.mean(abs(label - edsr), axis = (-2, -1))
+    control_e = np.mean(abs(label - control), axis = (-2, -1))
+    for ee, ce in zip(edsr_e, control_e):
+        print(ee, ce)

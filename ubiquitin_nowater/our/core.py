@@ -214,6 +214,8 @@ def execute(
 
     lmpX[:], lmpV[:] = newX, newV
 
+    Lammps.run(0, "pre yes post no")
+
     return 
 
 def VelocityVerlet(

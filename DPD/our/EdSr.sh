@@ -1,0 +1,63 @@
+#!/bin/bash
+#SBATCH --partition deimos
+#SBATCH -N 1
+#SBATCH --job-name edsr
+
+source ~/miniconda3/etc/profile.d/conda.sh
+source activate base
+
+module load mpi/mpich/4.1.2-icc-oneapi2023.2-ch4
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/APP/u22/x86/lib
+export OMP_NUM_THREADS=64
+
+bash_pid=$$
+
+# path of default arguments
+jsonfile="params.json"
+
+ntimestep=12
+
+# benchmark timestep
+basis=0.01
+# EdSr equation number of order
+maxIter=20
+# number of frames
+ntrajs=20000
+# choose one in ['benchmark', 'control', 'EdSr', 'vv']
+mode="control"
+# condition, only support nve condition so far.
+ensemble="nve" 
+# before run MD or EdSr, you can set this value to run "benchmark" timestep.
+prerun_step=0 
+# positive integer. similar to the LAMMPS thermo command.
+thermo=200 
+# 0, ~0 mean False, True in python, respectively.
+# Taking split argument is 100 and drop_last argument is 1 for example, if you run 105 step, the last 5 step will be dropped.
+drop_last=0 
+# number of frames saving to each npz file, non-positive number means the total trajectory will be save into a npz file
+split=10000 
+# if you do not want to write basical setting of your simulation in the core.py, you can provide path of env_set.lammps.
+# Except you understand how the program run, don't write some commands in your env_set.lammps (details in README.md).
+lmpfile="env_set.lammps" 
+
+logpath="log"
+prefix="DPD"
+debug=0 # ~0 denotes default arguments of debugging
+
+# exec 2>&1>"${mode}_${ensemble}_basis${basis}_scale_intv${ntimestep}_frames${ntrajs}_iter${maxIter}_${bash_pid}.log"
+exec 2>&1>"${logpath}/${prefix}_${mode}_${ensemble}_basis${basis}_intv${ntimestep}_frames${ntrajs}_${bash_pid}.log"
+
+# # the first choice to run the program
+python -u grid_loop.py --ntrajs $ntrajs --en  $ensemble --basis  $basis  --ntimestep   $ntimestep \
+                             --split  $split  --debug  $debug  --prerun_step $prerun_step \
+                             --thermo $thermo --maxiter $maxIter  --mode   $mode   --drop_last   $drop_last \
+                             --prefix $prefix
+
+# the second choice to run the program
+# nohup python -u grid_loop.py --params $jsonfile &
+
+# py_pid=$!
+# echo 
+# echo "Current Bash ID: ${bash_pid}"
+# echo "Python Process ID: ${py_pid}"
+# echo 

@@ -8,7 +8,7 @@ variable	er equal 15.0 # gromacs epsilon_r 15
 
 neighbor	10.0 bin
 
-timestep        10.0  
+timestep        10.0  # 
 
 bond_style	harmonic
 
@@ -20,7 +20,7 @@ improper_style  harmonic
 
 neigh_modify    delay 0 every 1 check yes
 
-pair_style      lj/cut/coul/cut 22.0
+pair_style      lj/cut/coul/cut 22.0 # rcoulomb 1.1 
 
 pair_modify     shift yes
 

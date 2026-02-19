@@ -3,7 +3,7 @@
     "ntimestep": 10,
     "ensemble": "nve",
     "thermo": 1,
-    "maxIter": 50,
+    "maxIter": 500,
     "ntrajs": 30,
     "mode": "EdSr",
     "prerun_step": 0,

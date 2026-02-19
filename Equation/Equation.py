@@ -18,6 +18,7 @@ class Equation(object):
         
         self.equation = equation
         self.values = np.arange(tStart, (tStep + 1) * interval + tStart, interval)
+        print(equation)
 
         match self.equation:
             case r'$f(x) = e^{-0.1x}$':
@@ -40,7 +41,7 @@ class Equation(object):
                 derivative = 3 * (self.values**2)
             case _:
                 raise TypeError
-
+        # print(self.values)
         self.src = src
         self.derivative = derivative
 
@@ -70,6 +71,12 @@ class Equation(object):
             case _:
                 raise TypeError
 
+        # return 0.01 * y # y = e^-0.1x
+        # return 6 * np.cbrt(y) # x^3
+        # return 2 # y = x^2- x - 5
+        # return y - 3 * y*y + 2*y*y*y # sigmoid
+        # return -y # sinx
+
     def computeEdSr(self, state, Dx, maxIter):
 
         y, dydx = state
@@ -81,11 +88,12 @@ class Equation(object):
 
         for n in range(maxIter, 0, -1):
             xcoeff = 2.0 * n
+            vcoeff = 2.0 * n
+
+            # * compute displacement 
             dy = dydx * Dx + self.secondOrder(yn) * Dxsq / xcoeff 
             yn = y + dy / (xcoeff - 1)
 
-        for n in range(maxIter, 0, -1):
-            vcoeff = 2.0 * n
             ddydx = self.secondOrder(dydxn) * Dx / (vcoeff - 1)
             dydxn = (y + (dydx + ddydx) * Dx / (vcoeff - 2)) if n > 1 else (dydx + ddydx)
     
@@ -118,7 +126,7 @@ class Equation(object):
         ttrajs[0] = self.getState(0)
         
         for i in range(trajs.shape[0] - 1): 
-
+            # ! 下一时刻减去当前时刻得到时间
             Dt = self.values[i + 1] - self.values[i]
 
             # attn EdSr computation
@@ -196,7 +204,7 @@ if __name__ == '__main__':
     tStart   : float = -40.0
     interval : float = 1.0
     tStep    : int   = 60
-    maxIter  : int   = 50
+    maxIter  : int   = 500
 
 
     # src_label: str = r'$f(x) = e^{0.1x}$'
@@ -222,7 +230,7 @@ if __name__ == '__main__':
     # plt.xlabel('$T_{time}$') ; plt.ylabel(r'$Error = \frac{predict - label}{label}$')
     plt.axis()
     # plt.tick_params(axis = 'both', labelsize = fontsize.get_size())
-    plt.yscale('log')
+    # plt.yscale('log')
 
     # attn MAE derived from x0
     # plt.title(f'Mean Absolute Error compared with {src_label}', loc = 'center', fontproperties = fontsize)
@@ -232,12 +240,12 @@ if __name__ == '__main__':
 
 
     # attn generate trajectory derived from x0
-    # plt.title(f'Trajectory of EdSr derived from $x_{{0}}$ and Label ', loc = 'center', fontproperties = fontsize)
-    # plt.xlabel(r'$x = x_0 + \Delta x$ (unitless)', fontproperties = fontsize); plt.ylabel('f(x)', fontproperties = fontsize)
-    # plt.plot(values, trajs[:, 0], label = 'Ours', linewidth = 2)
-    # plt.plot(values, label , label = src_label, linewidth = 1)
-    # plt.scatter(values, trajs[:, 0], s = 8)
-    # plt.scatter(values, label , s = 2)
+    plt.title(f'Trajectory of EdSr derived from $x_{{0}}$ and Label ', loc = 'center', fontproperties = fontsize)
+    plt.xlabel(r'$x = x_0 + \Delta x$ (unitless)', fontproperties = fontsize); plt.ylabel('f(x)', fontproperties = fontsize)
+    plt.plot(values, trajs[:, 0], label = 'Ours', linewidth = 2)
+    plt.plot(values, label , label = src_label, linewidth = 1)
+    plt.scatter(values, trajs[:, 0], s = 8)
+    plt.scatter(values, label , s = 2)
 
     # attn MAE derived from x(n-1)
     # plt.title(f'Mean Absolute Error compared with {src_label}', loc = 'center', fontproperties = fontsize)
@@ -248,13 +256,13 @@ if __name__ == '__main__':
     # ax.yaxis.get_offset_text().set(size = 15)
 
     # attn MAPE derived from x(n-1)
-    plt.title(f'Mean Absolute Percentage Error compared with {src_label}', loc = 'center', fontproperties = font_manager.FontProperties(size = 22))
-    # plt.ticklabel_format(axis = 'y', style = 'sci', useOffset = True, useMathText = True, scilimits = (-1, 3))
-    plt.xlabel(r'x(unitless)', fontproperties = fontsize); plt.ylabel('error(%)', fontproperties = fontsize)
-    plt.plot(values, mapederror, label = 'y error', linewidth = 2.5)
-    plt.plot(values, mapeverror, label = '$\\frac{dy}{dx}}$ error', linewidth = 1)
-    plt.ylim(top = 1e6)
-    ax.yaxis.get_offset_text().set(size = 15)
+    # plt.title(f'Mean Absolute Percentage Error compared with {src_label}', loc = 'center', fontproperties = font_manager.FontProperties(size = 22))
+    # # plt.ticklabel_format(axis = 'y', style = 'sci', useOffset = True, useMathText = True, scilimits = (-1, 3))
+    # plt.xlabel(r'x(unitless)', fontproperties = fontsize); plt.ylabel('error(%)', fontproperties = fontsize)
+    # plt.plot(values, mapederror, label = 'y error', linewidth = 2.5)
+    # plt.plot(values, mapeverror, label = '$\\frac{dy}{dx}}$ error', linewidth = 1)
+    # plt.ylim(top = 1e6)
+    # ax.yaxis.get_offset_text().set(size = 15)
 
 
     # attn generate trajectory derived from x(n-1)

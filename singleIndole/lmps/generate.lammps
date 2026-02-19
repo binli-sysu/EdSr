@@ -1,0 +1,40 @@
+units           real
+atom_style      full
+
+pair_style      lj/cut/coul/long 12.000
+bond_style      harmonic
+angle_style     harmonic
+dihedral_style  opls
+improper_style  cvff
+
+dielectric      1.0
+pair_modify     mix arithmetic
+special_bonds   lj/coul 0.0 0.0 1.0
+#box tilt        large
+read_data       data_beta.lammps
+
+group		zeo type 1 2 
+group		indole type 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18
+
+kspace_style    pppm 1.0e-4
+
+delete_atoms group zeo mol yes
+group zeo delete
+
+group indole1 id 769:784
+group indole2 id 785:800
+group indole3 id 801:816
+group indole4 id 817:832
+
+set group indole1 mol 1
+set group indole2 mol 2
+set group indole3 mol 3
+set group indole4 mol 4
+
+delete_atoms group indole2 mol yes
+delete_atoms group indole3 mol yes
+delete_atoms group indole4 mol yes
+
+reset_atoms id
+
+write_data no_zeo.data pair ij

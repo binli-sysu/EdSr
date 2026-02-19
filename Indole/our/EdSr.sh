@@ -1,23 +1,28 @@
 #!/bin/bash
+#SBATCH --partition deimos
+#SBATCH -N 1
+#SBATCH --job-name edsr
 
 source ~/miniconda3/etc/profile.d/conda.sh
-source activate lammps
+source activate base
 
-export OMP_NUM_THREADS=16
+module load mpi/mpich/4.1.2-icc-oneapi2023.2-ch4
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/APP/u22/x86/lib
+export OMP_NUM_THREADS=32
 
 bash_pid=$$
 
 # path of default arguments
 jsonfile="params.json"
 
-ntimestep=30
+ntimestep=5
 
 # benchmark timestep
-basis=1.0 
+basis=0.01 
 # EdSr equation number of order
 maxIter=50
 # number of frames
-ntrajs=20000 
+ntrajs=200000
 # choose one in ['benchmark', 'control', 'EdSr', 'vv']
 mode="EdSr" 
 # condition, only support nve condition so far.
@@ -30,29 +35,29 @@ thermo=200
 # Taking split argument is 100 and drop_last argument is 1 for example, if you run 105 step, the last 5 step will be dropped.
 drop_last=0 
 # number of frames saving to each npz file, non-positive number means the total trajectory will be save into a npz file
-split=10000 
+split=-1 
 # if you do not want to write basical setting of your simulation in the core.py, you can provide path of env_set.lammps.
 # Except you understand how the program run, don't write some commands in your env_set.lammps (details in README.md).
 lmpfile="env_set.lammps" 
 
 logpath="log"
-prefix="beta"
+prefix="Indole"
 debug=0 # ~0 denotes default arguments of debugging
 
 # exec 2>&1>"${mode}_${ensemble}_basis${basis}_scale_intv${ntimestep}_frames${ntrajs}_iter${maxIter}_${bash_pid}.log"
 exec 2>&1>"${logpath}/${prefix}_${mode}_${ensemble}_basis${basis}_intv${ntimestep}_frames${ntrajs}_${bash_pid}.log"
 
 # # the first choice to run the program
-# nohup python -u grid_loop.py --ntrajs $ntrajs --en      $ensemble --basis  $basis  --ntimestep   $ntimestep \
-#                              --split  $split  --lmpfile $lmpfile  --debug  $debug  --prerun_step $prerun_step \
-#                              --thermo $thermo --maxiter $maxIter  --mode   $mode   --drop_last   $drop_last \
-#                              --prefix $prefix &
+python -u grid_loop.py --ntrajs $ntrajs --en  $ensemble --basis  $basis  --ntimestep   $ntimestep \
+                             --split  $split  --debug  $debug  --prerun_step $prerun_step \
+                             --thermo $thermo --maxiter $maxIter  --mode   $mode   --drop_last   $drop_last \
+                             --prefix $prefix
 
 # the second choice to run the program
-nohup python -u grid_loop.py --params $jsonfile &
+# nohup python -u grid_loop.py --params $jsonfile &
 
-py_pid=$!
-echo 
-echo "Current Bash ID: ${bash_pid}"
-echo "Python Process ID: ${py_pid}"
-echo 
+# py_pid=$!
+# echo 
+# echo "Current Bash ID: ${bash_pid}"
+# echo "Python Process ID: ${py_pid}"
+# echo 

@@ -5,7 +5,7 @@ from typing import Literal
 import numpy as np
 from lammps import IPyLammps, PyLammps
 
-import logging
+import datetime, logging
 
 from tqdm import tqdm
 
@@ -18,8 +18,8 @@ logging.basicConfig(
     format='%(asctime)s - %(filename)s - %(levelname)s: %(message)s'
 )
 
-from mpi4py import MPI
-comm = MPI.COMM_WORLD
+# from mpi4py import MPI
+# comm = MPI.COMM_WORLD
 
 np.set_printoptions(threshold = np.inf)
 
@@ -141,6 +141,8 @@ def get_simulation(
     ppties.append(ppty)
 
     thermo_output: dict = simulation.lmp.last_thermo()
+
+    integrator_tottime = datetime.timedelta(seconds = 0.)
         
     thermo_val = list(thermo_output.values())
     thermo_values.append(thermo_val)
@@ -152,10 +154,10 @@ def get_simulation(
     try:
         with tqdm(total = ntrajs, desc = 'generating trajectories: ', position = start, disable = disable_tqdm) as run_bar:
             
-            if prerun_step > 0 and mode != 'benchmark' and mode != 'vv':
+            if prerun_step > 0 and mode != 'benchmark' and 'vv' not in mode:
 
                 for idx in range(start, start + prerun_step + 1):
-                    simulation.run(ntimestep, 'pre yes post no')
+                    simulation.run(ntimestep, 'pre no post no')
                     x, v, id, mass, atype, ppty = get_copy_current_state(simulation, properties_head)
                     xtrajs.append(x); vtrajs.append(v)
                     ppties.append(ppty)
@@ -195,13 +197,15 @@ def get_simulation(
 
             for idx in range(start, ntrajs + 1):
                 if mode == 'benchmark':
-                    simulation.run(ntimestep, 'pre yes post no')
+                    simulation.run(ntimestep, 'pre no post no')
                 elif mode == 'control':
-                    simulation.run(1, 'pre yes post no')
+                    simulation.run(1, 'pre no post no')
                 elif mode == 'EdSr':
-                    execute(simulation, basis_timestep * ntimestep, maxIter, disable_tqdm = disable_tqdm)
-                elif mode == 'vv':
-                    VelocityVerlet(simulation, basis_timestep, ntimestep, disable_tqdm = disable_tqdm)
+                    integrator_runtime = execute(simulation, basis_timestep * ntimestep, maxIter, disable_tqdm = disable_tqdm)
+                    integrator_tottime += integrator_runtime 
+                elif 'vv' in mode:
+                    _, integrator_runtime = VelocityVerlet(simulation, basis_timestep, ntimestep, disable_tqdm = disable_tqdm)
+                    integrator_tottime += integrator_runtime 
                 
                 x, v, id, mass, atype, ppty = get_copy_current_state(simulation, properties_head)
 
@@ -222,6 +226,7 @@ def get_simulation(
                 # save data
                 if len(xtrajs) == split and len(vtrajs) == split and len(ppties) == split:
                     logging.info(f'Saving {path}/frames{idx - split + 1}_{idx}.npz......')
+                    logging.info(f'running time of {mode}: {integrator_tottime}')
                     np.savez(
                         f'{path}/frames{idx - split + 1}_{idx}.npz', 
                         x = np.stack(xtrajs, axis = 0), 
@@ -285,6 +290,9 @@ def get_simulation(
     except Exception as e:
         logging.error((f"Something wrong, thermo can not convert to ndarray and save to npy file"), exc_info = True)
         raise
+
+    if mode == 'edsr' or 'vv' in mode:
+        logging.info(f"The running time of {mode}: {integrator_tottime}")
 
     if not keep_state:
         simulation.close()
@@ -364,7 +372,7 @@ else:
     # MD setting
     cmdargs        = ["-log", "none"] # args: https://docs.lammps.org/latest/Run_options.html 
     basis_timestep = 0.01
-    ntimestep      = 100
+    ntimestep      = 10
     ensemble       = 'nve'
     thermo         = 1
     lmpfile        = None
@@ -401,7 +409,7 @@ if folder is None:
     logging.info(f'Since fdname argument given is None, folder name will be initially set to {folder}')
 
 if prefix not in ['', None]:
-    logging.info(f'Concat the prefix and folder name -> {prefix + folder}')
+    logging.info(f'Concat the prefix and folder name -> {prefix}_{folder}')
     folder = prefix + '_' + folder
 
 
@@ -426,11 +434,12 @@ dict_params = dict(
     prerun_step  = prerun_step,
     thermo       = thermo,
     lmpfile      = lmpfile,
+    num_threads  = 32,
 )
 
 try:
     match mode:
-        case 'benchmark' | 'control' | 'vv' | 'EdSr':
+        case 'benchmark' | 'control' | 'EdSr' | 'vv':
             ppties = get_simulation(basis_timestep, ntimestep, cmdargs, ntrajs, f'{savepath}/{folder}/', properties_head, thermo_output,  **dict_params)
 
         case _:

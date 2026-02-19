@@ -1,0 +1,60 @@
+# 3d simulation
+
+atom_style	bond
+
+# Soft potential push-off
+
+read_data	data.lammps
+
+neighbor	2.0 bin
+neigh_modify	delay 0 every 1 check yes
+
+timestep        0.02
+thermo		100
+thermo_style    custom step time spcpu temp press pe ke enthalpy evdwl emol etotal
+
+bond_style 	harmonic
+bond_coeff	1 2.0 0.0
+
+# relaxation    
+pair_style      dpd 1.0 1.0 20202
+pair_coeff      1 1 25.0 4.5
+pair_coeff      1 2 25.0 4.5
+pair_coeff      2 2 25.0 4.5
+
+special_bonds   lj 1.0 1.0 1.0
+
+velocity	all create 1.0 2349852 dist gaussian
+
+fix             1 all nve/limit 0.1
+
+comm_modify	mode single vel yes
+
+dump nve_xyz all xyz 1000 eq.xyz
+dump_modify nve_xyz sort id units yes
+
+run		5000
+
+write_data nve_dpd.data pair ij
+
+# unfix		1
+# reset_timestep	0
+
+# # main run
+# pair_style	dpd 1.0 1.0 20202 
+# pair_coeff	1 1 25.0 4.5
+# pair_coeff	1 2 50.0 4.5
+# pair_coeff	2 2 25.0 4.5
+
+# # variable	prefactor equal ramp(1.0,20.0)
+
+# fix		2 all nve
+# # fix		2 all temp/rescale 1000 1.0 1.0 0.05 1.0
+# # fix		3 all adapt 1 pair soft a * * v_prefactor
+
+# dump            1 all xyz 500000 snapshot_*.xyz 
+# dump_modify	1 element A B
+# dump            2 all dcd 5000 output.dcd
+
+# # minimize        0 1.0e-8 1000 1000
+# run		500000

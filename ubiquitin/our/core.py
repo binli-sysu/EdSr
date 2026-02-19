@@ -1,11 +1,24 @@
-# coding: utf-8
+import time, datetime
+from functools import wraps
 from typing import Callable, Tuple
 
 from einops import rearrange
 import numpy as np
-from lammps import IPyLammps, PyLammps, lammps
 
+import lammps as lmps
+from lammps import IPyLammps, PyLammps, lammps
 from tqdm import tqdm
+
+def get_execution_time(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.monotonic()
+        res = func(*args, **kwargs)
+        end = time.monotonic()
+        return res, datetime.timedelta(seconds = end - start)
+    
+    return wrapper
+
 
 ftm2v_coeff = {
     'lj': 1.0,
@@ -17,6 +30,46 @@ ftm2v_coeff = {
     'micro': 1.0,
     'nano': 1.0,
 }
+
+"""
+thermo_style = [
+    # energy
+    "pe", # total potential energy
+    "ke", # kinetic energy
+    "etotal", # total energy (pe + ke)
+    "evdwl", # van der Waals pairwise energy (includes etail)
+    "ecoul", # Coulombic pairwise energy
+    "epair", # pairwise energy (evdwl + ecoul + elong)
+    "ebond", # bond energy
+    "eangle", # angle energy
+    "edihed", # dihedral energy
+    "eimp", # improper energy
+    "emol", # molecular energy (ebond + eangle + edihed + eimp)
+    "elong", # long-range kspace energy
+    "etail", # van der Waals energy long-range tail correction
+    "enthalpy", # enthalpy (etotal + press*vol)
+    "ecouple", # cumulative energy change due to thermo/baro statting fixes
+    "econserve", # pe + ke + ecouple = etotal + ecouple
+    # properties
+    "atoms", # number of atoms
+    "temp", # temperature
+    "press", # pressure
+    "vol", # volume
+    "density", # mass density of system
+    lx,ly,lz = box lengths in x,y,z
+]
+"""
+
+thermo_style = [
+    'custom', 'step', 'time', 'spcpu',
+    'temp', 'press',
+    'pe', 'ke',
+    'enthalpy', 'evdwl', 'ecoul', 'epair',
+    'ebond', 'eangle', 'edihed',
+    'elong', 'etail', 'emol',
+    'ecouple', 'econserve', 'etotal',
+    'lx', 'ly', 'lz',
+]
 
 def env_preset(MDsimulation: PyLammps):
 
@@ -35,10 +88,13 @@ def env_preset(MDsimulation: PyLammps):
     
     MDsimulation.read_data('../lmps/data/nve_protein.data')
 
+    MDsimulation.atom_modify('sort 0 0.0') # turn off sort algorithm
+
     MDsimulation.group('protein id 1:163')
 
     MDsimulation.neighbor('10.0 bin')
-    
+
+    MDsimulation.neigh_modify('every 1 delay 0 check yes')
 
 def create_simulation(thermo_ouput: list, infile: str | None = None, timestep = 0.2, cmdargs = None, num_threads: int = 1, ensemble: str = 'nve') -> IPyLammps:
 
@@ -50,21 +106,15 @@ def create_simulation(thermo_ouput: list, infile: str | None = None, timestep = 
     if num_threads > 1:
         MDsimulation.package(f"omp {num_threads} neigh yes")
         MDsimulation.suffix('omp')
-
+    
     if infile is None:
         env_preset(MDsimulation)
     else:
         MDsimulation.file(infile)
-
-    if ensemble == 'nvt':
-        raise NotImplementedError
-    elif ensemble == 'nve':
-        MDsimulation.fix('1 all nve')
-    # MDsimulation.fix('eqfix all nvt temp 300.0 300.0 100.0')
-
+    
     MDsimulation.atom_modify('sort 0 0.0') # turn off sort algorithm
-        
-    MDsimulation.thermo(1)
+
+    MDsimulation.fix('1 all nve')
 
     MDsimulation.thermo_modify('lost/bond ignore')
 
@@ -78,7 +128,6 @@ def create_simulation(thermo_ouput: list, infile: str | None = None, timestep = 
     MDsimulation.enable_cmd_history = False
 
     return MDsimulation
-
 
 def gradientFunction(Lammps: IPyLammps | PyLammps, Position: np.ndarray) -> np.ndarray:
     """
@@ -103,12 +152,11 @@ def gradientFunction(Lammps: IPyLammps | PyLammps, Position: np.ndarray) -> np.n
 
 
 
-def compute_EdSr(
+def compute_Taylor(
     Lammps: IPyLammps, 
     SystemState: Tuple[np.ndarray, np.ndarray], 
     Dt: float, 
     maxIter: int, 
-    gradient_func: Callable,
     boundary: np.ndarray, 
     shielding_matrix: np.ndarray = None,
     disable_tqdm: bool = False,
@@ -136,20 +184,20 @@ def compute_EdSr(
     
     xn = x.copy()
     vn = x.copy()
-    with tqdm(total = maxIter, desc = 'EdSr Iteration: ', leave = False, position = 1, disable = disable_tqdm) as edsr_bar:
+    with tqdm(total = maxIter, desc = 'taylor Iteration: ', leave = False, position = 1, disable = disable_tqdm) as taylor_bar:
         for n in range(maxIter, 0, -1):
             xcoeff = 2.0 * n
             vcoeff = 2.0 * n
 
             # * compute displacement
-            xn_grad = gradient_func(Lammps, xn)
+            xn_grad = gradientFunction(Lammps, xn)
 
-            dx = v * Dt + massinv * xn_grad * Dtsq / xcoeff
-            xn = x + dx / (xcoeff - 1)
-            # xn = x + v * Dt / (xcoeff - 1) + massinv_Dtsq * (1./(xcoeff - 1) - 1./xcoeff) * xn_grad
+            # dx = v * Dt + massinv * xn_grad * Dtsq / xcoeff
+            # xn = x + dx / (xcoeff - 1)
+            xn = x + v * Dt / (xcoeff - 1) + massinv_Dtsq * (1./(xcoeff - 1) - 1./xcoeff) * xn_grad
 
             # * compute velocity
-            vn_grad = gradient_func(Lammps, vn)
+            vn_grad = gradientFunction(Lammps, vn)
 
             dv = massinv * vn_grad * Dt / (vcoeff - 1)
             vn = (x + (v + dv) * Dt / (vcoeff - 2)) if n > 1 else (v + dv)
@@ -162,8 +210,76 @@ def compute_EdSr(
                 vn = np.where(vn < blo, vn + blen, vn)
                 vn = np.where(vn < bhi, vn, vn - blen)
 
-            edsr_bar.update()
+            taylor_bar.update()
     
+    return xn, vn
+
+@get_execution_time
+def compute_Taylor_notqdm(
+    Lammps: IPyLammps, 
+    SystemState: Tuple[np.ndarray, np.ndarray], 
+    Dt: float, 
+    maxIter: int, 
+    boundary: np.ndarray, 
+    shielding_matrix: np.ndarray = None,
+    disable_tqdm: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, ]:
+    """
+    core function
+    """
+    x, v, mass = SystemState
+
+    srcx = Lammps.lmp.numpy.extract_atom('x')
+    force = Lammps.lmp.numpy.extract_atom('f')
+
+    matrix = np.ones(x.shape)
+    
+    if shielding_matrix is not None:
+        matrix[shielding_matrix] = 0.
+        v[shielding_matrix] = 0.
+
+    ftm2v = ftm2v_coeff[Lammps.system.units]
+    massinv = matrix * ftm2v / mass
+
+    Dtsq = Dt * Dt
+
+    massinv_Dtsq = massinv * Dtsq
+
+    blo, bhi = boundary
+    blen = bhi - blo
+    
+    xn = x.copy()
+    vn = x.copy()
+
+    for n in range(maxIter, 0, -1):
+        xcoeff = 2.0 * n
+        vcoeff = 2.0 * n
+
+        # * compute displacement
+        # xn_grad = gradientFunction(Lammps, xn)
+        srcx[:] = xn
+        Lammps.run(0, 'pre yes post no')
+
+        # dx = v * Dt + massinv * xn_grad * Dtsq / xcoeff
+        # xn = x + dx / (xcoeff - 1)
+        xn = x + v * Dt / (xcoeff - 1) + massinv_Dtsq * (1./(xcoeff - 1) - 1./xcoeff) * force
+
+        # * compute velocity
+        # vn_grad = gradientFunction(Lammps, vn)
+        srcx[:] = vn
+        Lammps.run(0, 'pre yes post no')
+
+        dv = massinv * force * Dt / (vcoeff - 1)
+        vn = (x + (v + dv) * Dt / (vcoeff - 2)) if n > 1 else (v + dv)
+
+        # attn periodical condition
+        # * [blo, bhi) has been desrcibed in LAMMPS
+        xn = np.where(xn < blo, xn + blen, xn)
+        xn = np.where(xn < bhi, xn, xn - blen)
+        if n > 1:
+            vn = np.where(vn < blo, vn + blen, vn)
+            vn = np.where(vn < bhi, vn, vn - blen)
+
     return xn, vn
 
 
@@ -171,11 +287,12 @@ def compute_EdSr(
 def execute(
     Lammps: PyLammps | IPyLammps, 
     Dt: float, 
-    maxIter: int, 
+    maxIter: int,
     disable_tqdm: bool = False, 
-) -> None:
+    scale: bool = False
+) -> datetime.timedelta:
     """
-    execute a step of the whole EdSr algorithm
+    execute a step of the whole taylor algorithm
     """
     
     # get the initial state of system
@@ -184,7 +301,6 @@ def execute(
     
     # set the shielding matrix, True means that gradient set to 0., False is the opposite, shielding matrix is 1-D tensor
     # * set gradient of atoms of id < 3
-    # shielding_matrix = atomtype < 3
     shielding_matrix = None
 
     mass = rearrange(lmpMass[atomtype], 'l -> l 1')
@@ -195,20 +311,29 @@ def execute(
         [Lammps.system.xhi, Lammps.system.yhi, Lammps.system.zhi]
     ])
     
-    newX, newV = compute_EdSr(Lammps, SystemState, Dt, maxIter, gradientFunction, boundary, shielding_matrix, disable_tqdm = disable_tqdm)
+    # newX, newV, exectime = compute_Taylor(Lammps, SystemState, Dt, maxIter, boundary, shielding_matrix, disable_tqdm = disable_tqdm)
+
+    (newX, newV), exectime = compute_Taylor_notqdm(Lammps, SystemState, Dt, maxIter, boundary, shielding_matrix, disable_tqdm = disable_tqdm)
 
     lmpX[:], lmpV[:] = newX, newV
 
-    return 
+    Lammps.run(0, "pre yes post no")
+    
+    if scale:
+        Lammps.velocity('indole scale 700.0')
 
+    return exectime
+
+@get_execution_time
 def VelocityVerlet(
-    Lammps: PyLammps | IPyLammps,
+    Lammps: PyLammps | IPyLammps, 
     basis_timestep: float, 
     ntimestep: int, 
-    disable_tqdm: bool = False
-) -> None:
+    disable_tqdm: bool = False,
+    mode: str = 'vvbm'
+) -> datetime.timedelta:
 
-    def execute(Lammps: PyLammps | IPyLammps, Dt: float):
+    def execute(Lammps: PyLammps | IPyLammps, Dt: float, force: np.ndarray):
         # get the initial state of system
         lmpX, lmpV = Lammps.lmp.numpy.extract_atom('x'), Lammps.lmp.numpy.extract_atom('v')
         lmpMass, atomtype = Lammps.lmp.numpy.extract_atom('mass'), Lammps.lmp.numpy.extract_atom('type')
@@ -219,33 +344,38 @@ def VelocityVerlet(
         
         # keep the atoms of boundary stationary
         matrix = np.ones_like(x_0)
-        matrix[atomtype < 3] = 0.
-        v_0[atomtype < 3] = 0.
+        # matrix[atomtype < 3] = 0.
+        # v_0[atomtype < 3] = 0.
 
         ftm2v = ftm2v_coeff[Lammps.system.units]
         massinv = matrix * ftm2v / mass
-        Dt_half = Dt * 0.5
+        # Dt_half = Dt * 0.5
+        Dtsq = Dt * Dt
 
-        # get gradient at t by using Lammps API and compute v(t + Dt/2)
-        force = gradientFunction(Lammps, x_0)
-        v_ht = v_0 + massinv * force * Dt_half
+        # get gradient at t by using Lammps API
+        # force = gradientFunction(Lammps, x_0)
+        # v_ht = v_0 + massinv * force * Dt_half
 
-        # compute r(t + Dt)
-        x_t = x_0 + v_ht * Dt
+        # get gradient at t by using Lammps API and compute r(t + Dt)
+        force_t0 = force if force is not None else gradientFunction(Lammps, x_0)
+        x_t = x_0 + v_0 * Dt + 0.5 * massinv * force_t0 * Dtsq
 
         # get gradient at t + Dt by using Lammps API and compute v(t + Dt)
-        force = gradientFunction(Lammps, x_t)
-        v_t = v_ht + massinv * force * Dt_half
+        force_t1 = gradientFunction(Lammps, x_t)
+        v_t = v_0 + massinv * (force_t0 + force_t1) * Dt * 0.5
 
         # put x_t, v_t into source address
         lmpX[:] = x_t; lmpV[:] = v_t
 
-    with tqdm(total = ntimestep, desc = 'vv Iteration: ', leave = False, position = 1, disable = disable_tqdm) as vv_bar:
-        for _ in range(ntimestep):
-            execute(Lammps, basis_timestep)
-            vv_bar.update()
+        return force_t1
+    
+    if mode == 'vvbm':
+        with tqdm(total = ntimestep, desc = 'vv Iteration: ', leave = False, position = 1, disable = disable_tqdm) as vv_bar:
+            force_t0 = None
+            for _ in range(ntimestep):
+                force_t0 = execute(Lammps, basis_timestep, force_t0)
+                vv_bar.update()
+    elif mode == 'vvctrl':
+        force_t0 = execute(Lammps, ntimestep * basis_timestep, None)
 
     return
-
-
-
